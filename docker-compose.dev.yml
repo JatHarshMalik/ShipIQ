@@ -1,0 +1,42 @@
+# Development docker-compose with volume mounts for hot reload
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: shipiq-backend-dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app:ro
+    environment:
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+      - LOG_LEVEL=debug
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+    networks:
+      - shipiq-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: shipiq-frontend-dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - shipiq-network
+
+networks:
+  shipiq-network:
+    driver: bridge
