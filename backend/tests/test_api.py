@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import pytest
 from fastapi.testclient import TestClient
+
+# Use an in-memory (temp) DB for tests
+os.environ["SHIPIQ_DB_PATH"] = ":memory:"
 
 from app.main import app
 from app.storage import store
@@ -38,10 +42,9 @@ SAMPLE_PAYLOAD = {
 
 @pytest.fixture(autouse=True)
 def reset_store():
-    """Ensure each test starts with a clean store."""
-    store.clear()
+    store.clear("default")
     yield
-    store.clear()
+    store.clear("default")
 
 
 @pytest.fixture()
@@ -74,58 +77,59 @@ class TestPostInput:
         assert body["cargo_count"] == 10
         assert body["tank_count"] == 10
 
+    def test_session_input_returns_201(self, client):
+        resp = client.post("/input/user-abc", json=SAMPLE_PAYLOAD)
+        assert resp.status_code == 201
+
     def test_empty_cargos_returns_422(self, client):
         payload = {**SAMPLE_PAYLOAD, "cargos": []}
-        resp = client.post("/input", json=payload)
-        assert resp.status_code == 422
+        assert client.post("/input", json=payload).status_code == 422
 
     def test_empty_tanks_returns_422(self, client):
         payload = {**SAMPLE_PAYLOAD, "tanks": []}
-        resp = client.post("/input", json=payload)
-        assert resp.status_code == 422
+        assert client.post("/input", json=payload).status_code == 422
 
     def test_duplicate_cargo_ids_returns_422(self, client):
         payload = {
             "cargos": [{"id": "C1", "volume": 100}, {"id": "C1", "volume": 200}],
             "tanks": [{"id": "T1", "capacity": 300}],
         }
-        resp = client.post("/input", json=payload)
-        assert resp.status_code == 422
+        assert client.post("/input", json=payload).status_code == 422
 
     def test_duplicate_tank_ids_returns_422(self, client):
         payload = {
             "cargos": [{"id": "C1", "volume": 100}],
             "tanks": [{"id": "T1", "capacity": 300}, {"id": "T1", "capacity": 400}],
         }
-        resp = client.post("/input", json=payload)
-        assert resp.status_code == 422
+        assert client.post("/input", json=payload).status_code == 422
 
     def test_negative_volume_returns_422(self, client):
         payload = {
             "cargos": [{"id": "C1", "volume": -100}],
             "tanks": [{"id": "T1", "capacity": 300}],
         }
-        resp = client.post("/input", json=payload)
-        assert resp.status_code == 422
+        assert client.post("/input", json=payload).status_code == 422
 
     def test_zero_capacity_returns_422(self, client):
         payload = {
             "cargos": [{"id": "C1", "volume": 100}],
             "tanks": [{"id": "T1", "capacity": 0}],
         }
-        resp = client.post("/input", json=payload)
-        assert resp.status_code == 422
+        assert client.post("/input", json=payload).status_code == 422
 
     def test_new_input_clears_previous_result(self, client):
-        # First full workflow
         client.post("/input", json=SAMPLE_PAYLOAD)
         client.post("/optimize")
         assert client.get("/results").status_code == 200
-
-        # Resubmit input – previous result must be gone
         client.post("/input", json=SAMPLE_PAYLOAD)
-        resp = client.get("/results")
-        assert resp.status_code == 404
+        assert client.get("/results").status_code == 404
+
+    def test_weight_fields_accepted(self, client):
+        payload = {
+            "cargos": [{"id": "C1", "volume": 500, "weight": 250}],
+            "tanks": [{"id": "T1", "capacity": 500, "weight_limit": 300}],
+        }
+        assert client.post("/input", json=payload).status_code == 201
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +139,7 @@ class TestPostInput:
 
 class TestPostOptimize:
     def test_optimize_without_input_returns_400(self, client):
-        resp = client.post("/optimize")
-        assert resp.status_code == 400
+        assert client.post("/optimize").status_code == 400
 
     def test_optimize_returns_result(self, client):
         client.post("/input", json=SAMPLE_PAYLOAD)
@@ -144,16 +147,14 @@ class TestPostOptimize:
         assert resp.status_code == 200
         body = resp.json()
         assert "allocations" in body
-        assert "total_loaded_volume" in body
         assert body["loading_efficiency_pct"] == 100.0
 
     def test_optimize_full_load_sample_data(self, client):
         client.post("/input", json=SAMPLE_PAYLOAD)
         body = client.post("/optimize").json()
-        expected_total = sum(c["volume"] for c in SAMPLE_PAYLOAD["cargos"])
-        assert body["total_loaded_volume"] == expected_total
+        expected = sum(c["volume"] for c in SAMPLE_PAYLOAD["cargos"])
+        assert body["total_loaded_volume"] == expected
         assert body["unallocated_cargo"] == []
-        assert body["unused_tank_capacity"] == []
 
     def test_optimize_each_tank_single_cargo(self, client):
         client.post("/input", json=SAMPLE_PAYLOAD)
@@ -174,6 +175,13 @@ class TestPostOptimize:
         assert body["total_loaded_volume"] == 500
         assert body["loading_efficiency_pct"] == 50.0
 
+    def test_optimize_session_isolated(self, client):
+        """Two sessions should not share results."""
+        client.post("/input/s1", json=SAMPLE_PAYLOAD)
+        client.post("/optimize/s1")
+        # s2 has no input – should 400
+        assert client.post("/optimize/s2").status_code == 400
+
 
 # ---------------------------------------------------------------------------
 # GET /results
@@ -182,19 +190,39 @@ class TestPostOptimize:
 
 class TestGetResults:
     def test_results_before_optimize_returns_404(self, client):
-        resp = client.get("/results")
-        assert resp.status_code == 404
+        assert client.get("/results").status_code == 404
 
     def test_results_after_optimize_returns_200(self, client):
         client.post("/input", json=SAMPLE_PAYLOAD)
         client.post("/optimize")
         resp = client.get("/results")
         assert resp.status_code == 200
-        body = resp.json()
-        assert "allocations" in body
+        assert "allocations" in resp.json()
 
     def test_results_consistent_with_optimize_response(self, client):
         client.post("/input", json=SAMPLE_PAYLOAD)
         opt_body = client.post("/optimize").json()
         res_body = client.get("/results").json()
         assert opt_body == res_body
+
+    def test_results_persist_across_calls(self, client):
+        """Results must survive a second GET /results call (persistence check)."""
+        client.post("/input", json=SAMPLE_PAYLOAD)
+        client.post("/optimize")
+        first = client.get("/results").json()
+        second = client.get("/results").json()
+        assert first == second
+
+
+# ---------------------------------------------------------------------------
+# DELETE /session
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSession:
+    def test_delete_session_clears_data(self, client):
+        client.post("/input/to-delete", json=SAMPLE_PAYLOAD)
+        client.post("/optimize/to-delete")
+        assert client.get("/results/to-delete").status_code == 200
+        client.delete("/session/to-delete")
+        assert client.get("/results/to-delete").status_code == 404

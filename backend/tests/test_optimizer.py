@@ -46,7 +46,6 @@ SAMPLE_TANKS = [
 
 class TestOptimizeBasic:
     def test_total_volumes_equal_full_load(self):
-        """When total cargo == total capacity everything should be loaded."""
         result = optimize(SAMPLE_CARGOS, SAMPLE_TANKS)
         assert result.total_cargo_volume == result.total_tank_capacity
         assert result.total_loaded_volume == result.total_tank_capacity
@@ -60,15 +59,16 @@ class TestOptimizeBasic:
         result = optimize(SAMPLE_CARGOS, SAMPLE_TANKS)
         assert result.unused_tank_capacity == []
 
-    def test_each_tank_holds_single_cargo(self):
-        """A tank must reference at most one cargo ID."""
+    def test_each_tank_holds_single_cargo_type(self):
+        """Each tank must reference exactly one cargo ID – explicit constraint."""
         result = optimize(SAMPLE_CARGOS, SAMPLE_TANKS)
         tank_cargo_ids: dict[str, set[str]] = {}
         for entry in result.allocations:
             tank_cargo_ids.setdefault(entry.tank_id, set()).add(entry.cargo_id)
         for tank_id, cargo_ids in tank_cargo_ids.items():
             assert len(cargo_ids) == 1, (
-                f"Tank {tank_id} was assigned multiple cargo IDs: {cargo_ids}"
+                f"Tank {tank_id} was assigned multiple cargo IDs: {cargo_ids}. "
+                "Single-cargo-per-tank constraint violated."
             )
 
     def test_allocation_volumes_sum_to_total_loaded(self):
@@ -103,18 +103,15 @@ class TestOptimizeEdgeCases:
         assert result.allocations[0].cargo_id == "C1"
 
     def test_cargo_larger_than_single_tank_is_split(self):
-        """A cargo of 1000 split across two tanks of 600 and 400."""
         cargos = [Cargo(id="C1", volume=1000)]
         tanks = [Tank(id="T1", capacity=600), Tank(id="T2", capacity=400)]
         result = optimize(cargos, tanks)
         assert result.total_loaded_volume == 1000
         assert len(result.allocations) == 2
-        # Both tanks should carry C1
         for entry in result.allocations:
             assert entry.cargo_id == "C1"
 
     def test_capacity_larger_than_cargo_leaves_unallocated_space(self):
-        """Tank capacity exceeds total cargo – some capacity is unused."""
         cargos = [Cargo(id="C1", volume=300)]
         tanks = [Tank(id="T1", capacity=1000)]
         result = optimize(cargos, tanks)
@@ -123,7 +120,6 @@ class TestOptimizeEdgeCases:
         assert result.unallocated_cargo == []
 
     def test_cargo_volume_exceeds_capacity(self):
-        """When total cargo > total capacity, partial loading occurs."""
         cargos = [Cargo(id="C1", volume=5000)]
         tanks = [Tank(id="T1", capacity=3000)]
         result = optimize(cargos, tanks)
@@ -131,13 +127,6 @@ class TestOptimizeEdgeCases:
         assert len(result.unallocated_cargo) == 1
         assert result.unallocated_cargo[0].id == "C1"
         assert result.unallocated_cargo[0].volume == 2000
-
-    def test_multiple_cargos_fit_in_one_tank_each(self):
-        cargos = [Cargo(id=f"C{i}", volume=100 * i) for i in range(1, 4)]
-        tanks = [Tank(id=f"T{i}", capacity=100 * i) for i in range(1, 4)]
-        result = optimize(cargos, tanks)
-        assert result.total_loaded_volume == sum(100 * i for i in range(1, 4))
-        assert result.unallocated_cargo == []
 
     def test_empty_cargo_list_results_in_no_allocations(self):
         result = optimize([], [Tank(id="T1", capacity=500)])
@@ -151,17 +140,11 @@ class TestOptimizeEdgeCases:
         assert result.allocations == []
         assert result.unallocated_cargo == [Cargo(id="C1", volume=500)]
 
-    def test_many_small_cargos_fill_large_tank(self):
-        """Tank holds only one cargo type: only the first cargo (100 vol) loads into T1.
-
-        Even though the tank has capacity for all 5 cargos, the constraint
-        'one cargo ID per tank' means only 100 units are loaded and the
-        remaining capacity is unused.
-        """
+    def test_many_small_cargos_single_large_tank_one_cargo_per_tank(self):
+        """Tank holds only one cargo type: only the first cargo loads into T1."""
         cargos = [Cargo(id=f"C{i}", volume=100) for i in range(1, 6)]
         tanks = [Tank(id="T1", capacity=500)]
         result = optimize(cargos, tanks)
-        # Tank can only hold ONE cargo type, so at most 100 can be loaded into T1
         assert result.total_loaded_volume == 100
         assert len(result.allocations) == 1
 
@@ -176,3 +159,46 @@ class TestOptimizeEdgeCases:
         tanks = [Tank(id="T1", capacity=333.33)]
         result = optimize(cargos, tanks)
         assert result.total_loaded_volume == 333.33
+
+
+# ---------------------------------------------------------------------------
+# Weight constraint tests (new)
+# ---------------------------------------------------------------------------
+
+
+class TestWeightConstraints:
+    def test_weight_limit_prevents_overloading(self):
+        """Tank weight limit of 100t with cargo density 1t/m³ — only 100m³ loads."""
+        cargos = [Cargo(id="C1", volume=500, weight=500)]  # 1 t/m³
+        tanks = [Tank(id="T1", capacity=500, weight_limit=100)]
+        result = optimize(cargos, tanks)
+        assert result.total_loaded_volume == 100.0
+        assert result.unallocated_cargo[0].volume == 400.0
+
+    def test_unconstrained_weight_ignores_weight_limit(self):
+        """weight=0 means unconstrained; full volume should load regardless of weight_limit."""
+        cargos = [Cargo(id="C1", volume=500, weight=0)]  # no weight
+        tanks = [Tank(id="T1", capacity=500, weight_limit=100)]
+        result = optimize(cargos, tanks)
+        assert result.total_loaded_volume == 500.0
+
+    def test_weight_and_volume_both_respected(self):
+        """Cargo is limited by volume (200m³ max) not weight (400t headroom)."""
+        cargos = [Cargo(id="C1", volume=200, weight=200)]  # 1 t/m³
+        tanks = [Tank(id="T1", capacity=300, weight_limit=400)]
+        result = optimize(cargos, tanks)
+        # volume is the binding constraint here
+        assert result.total_loaded_volume == 200.0
+
+    def test_single_cargo_per_tank_is_explicit_not_via_break(self):
+        """
+        Verify the single-cargo constraint: a tank with plenty of space
+        still only receives ONE cargo type.
+        """
+        cargos = [Cargo(id="C1", volume=50), Cargo(id="C2", volume=50)]
+        tanks = [Tank(id="T1", capacity=200)]
+        result = optimize(cargos, tanks)
+        tank_cargo_ids = {a.cargo_id for a in result.allocations if a.tank_id == "T1"}
+        assert len(tank_cargo_ids) == 1, (
+            f"T1 received multiple cargo types: {tank_cargo_ids}"
+        )

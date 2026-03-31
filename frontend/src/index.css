@@ -598,3 +598,52 @@ tbody td {
     display: none;
   }
 }
+
+/* ── New styles for v2 fixes ── */
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.section-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-text {
+  background: none;
+  border: none;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.btn-text:hover {
+  background: var(--accent-bg);
+}
+
+.input-error {
+  border-color: var(--danger-text) !important;
+  background: var(--danger-bg) !important;
+}
+
+.row-error {
+  font-size: 11px;
+  color: var(--danger-text);
+  padding: 2px 8px 4px;
+}
+
+/* section-title already existed, keep margin behavior for standalone use */
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}

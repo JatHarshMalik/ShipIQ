@@ -3,22 +3,23 @@
 Algorithm
 ---------
 Because *cargo splitting is allowed* and *each tank holds only one cargo
-type*, the problem reduces to a simple greedy fill:
+type*, the problem reduces to a greedy fill:
 
-1. Sort tanks by capacity (largest first) – optional but produces a tidy
-   allocation that is easier to inspect.
-2. Maintain a queue of remaining cargo sorted by volume (largest first).
-3. For each tank, fill it with as much of the *current* cargo as possible.
-   If the cargo is fully consumed before the tank is full, move to the next
-   cargo item (the tank still holds only the first cargo type used there).
+1. Sort tanks by capacity (largest first).
+2. Maintain a deque of remaining cargo sorted by volume (largest first).
+3. For each tank, fill it with as much of the *current* cargo as possible,
+   subject to:
+     a. The tank's remaining volume capacity.
+     b. The tank's weight limit (if > 0): loaded weight ≤ weight_limit.
+   Each tank is assigned **exactly one cargo type** (hard constraint).
 4. Continue until every tank is filled or every cargo is exhausted.
 
 Optimality proof (sketch)
 --------------------------
-With splitting allowed, the maximum loadable volume is
-    min(ΣV_cargo, ΣC_tank).
-The greedy algorithm always achieves this bound because it never wastes
-capacity when cargo is still available.
+With splitting allowed and no weight constraints, the maximum loadable
+volume is min(ΣV_cargo, ΣC_tank).  The greedy algorithm always achieves
+this bound because it never wastes capacity when cargo is still available.
+Weight limits may reduce the achievable volume below this theoretical max.
 
 Time complexity: O(n log n + m log m + n + m) ≈ O((n+m) log(n+m))
 where n = number of tanks, m = number of cargos.
@@ -37,15 +38,44 @@ def _round2(value: float) -> float:
     return round(value, 2)
 
 
+def _weight_per_volume(cargo_volume: float, cargo_weight: float) -> float:
+    """Return cargo weight density (t/m³), or 0 if weight is unconstrained."""
+    if cargo_weight <= 0 or cargo_volume <= 0:
+        return 0.0
+    return cargo_weight / cargo_volume
+
+
+def _max_volume_by_weight(
+    space_left: float,
+    weight_loaded: float,
+    weight_limit: float,
+    density: float,
+) -> float:
+    """
+    Given remaining volume space and weight headroom, return the maximum
+    volume that can be loaded without breaching the weight limit.
+
+    If density is 0 (unconstrained), only volume limits apply.
+    """
+    if weight_limit <= 0 or density <= 0:
+        # No weight constraint active
+        return space_left
+    weight_headroom = weight_limit - weight_loaded
+    if weight_headroom <= 0:
+        return 0.0
+    max_by_weight = weight_headroom / density
+    return min(space_left, max_by_weight)
+
+
 def optimize(cargos: List[Cargo], tanks: List[Tank]) -> OptimizationResult:
     """Run the greedy cargo allocation algorithm.
 
     Parameters
     ----------
     cargos:
-        List of cargo items (id, volume).
+        List of cargo items (id, volume, weight).
     tanks:
-        List of tanks (id, capacity).
+        List of tanks (id, capacity, weight_limit).
 
     Returns
     -------
@@ -56,8 +86,11 @@ def optimize(cargos: List[Cargo], tanks: List[Tank]) -> OptimizationResult:
     total_tank_capacity = sum(t.capacity for t in tanks)
 
     # Work with mutable copies – sort largest first for a clean allocation.
-    cargo_queue: Deque[Tuple[str, float]] = deque(
-        sorted(((c.id, c.volume) for c in cargos), key=lambda x: -x[1])
+    cargo_queue: Deque[Tuple[str, float, float]] = deque(
+        sorted(
+            ((c.id, c.volume, c.weight) for c in cargos),
+            key=lambda x: -x[1],
+        )
     )
     tank_list: List[Tank] = sorted(tanks, key=lambda t: -t.capacity)
 
@@ -67,38 +100,52 @@ def optimize(cargos: List[Cargo], tanks: List[Tank]) -> OptimizationResult:
 
     for tank in tank_list:
         space_left = tank.capacity
+        weight_loaded = 0.0  # tonnes loaded into this tank so far
 
-        while space_left > 0 and cargo_queue:
-            cargo_id, cargo_remaining = cargo_queue[0]
-
-            loaded = min(space_left, cargo_remaining)
-            space_left -= loaded
-            remaining[cargo_id] -= loaded
-
-            utilization = _round2(loaded / tank.capacity * 100)
-            allocations.append(
-                AllocationEntry(
-                    tank_id=tank.id,
-                    cargo_id=cargo_id,
-                    allocated_volume=_round2(loaded),
-                    tank_capacity=tank.capacity,
-                    utilization_pct=utilization,
-                )
-            )
-
-            if remaining[cargo_id] == 0:
-                cargo_queue.popleft()
-            else:
-                # Partial fill: update the remaining volume for this cargo.
-                cargo_queue[0] = (cargo_id, remaining[cargo_id])
-
-            # A tank can only hold one cargo type – stop after the first
-            # cargo has been assigned to this tank.
+        if not cargo_queue:
             break
 
-    total_loaded = _round2(
-        sum(a.allocated_volume for a in allocations)
-    )
+        # --- EXPLICIT single-cargo-per-tank constraint ---
+        # Each tank receives exactly one cargo type.  We peek at the front
+        # of the queue and allocate as much of that cargo as the tank allows,
+        # then move to the next tank regardless of remaining space.
+        cargo_id, cargo_remaining, cargo_weight = cargo_queue[0]
+        density = _weight_per_volume(
+            # Use original volume to compute density
+            next(c.volume for c in cargos if c.id == cargo_id),
+            cargo_weight,
+        )
+
+        loaded = _max_volume_by_weight(
+            space_left, weight_loaded, tank.weight_limit, density
+        )
+        loaded = min(loaded, cargo_remaining)
+
+        if loaded <= 0:
+            # Tank weight limit prevents any loading – leave tank empty.
+            continue
+
+        weight_loaded += loaded * density if density > 0 else 0.0
+        remaining[cargo_id] -= loaded
+
+        utilization = _round2(loaded / tank.capacity * 100)
+        allocations.append(
+            AllocationEntry(
+                tank_id=tank.id,
+                cargo_id=cargo_id,
+                allocated_volume=_round2(loaded),
+                tank_capacity=tank.capacity,
+                utilization_pct=utilization,
+            )
+        )
+
+        if remaining[cargo_id] <= 1e-9:
+            cargo_queue.popleft()
+        else:
+            # Update remaining volume for this cargo.
+            cargo_queue[0] = (cargo_id, remaining[cargo_id], cargo_weight)
+
+    total_loaded = _round2(sum(a.allocated_volume for a in allocations))
     efficiency = _round2(
         total_loaded / total_tank_capacity * 100 if total_tank_capacity > 0 else 0.0
     )
@@ -106,10 +153,9 @@ def optimize(cargos: List[Cargo], tanks: List[Tank]) -> OptimizationResult:
     unallocated = [
         Cargo(id=cid, volume=_round2(vol))
         for cid, vol in remaining.items()
-        if vol > 0
+        if vol > 1e-9
     ]
 
-    # Determine which tanks received no allocation at all.
     allocated_tank_ids = {a.tank_id for a in allocations}
     unused_tanks = [t for t in tanks if t.id not in allocated_tank_ids]
 

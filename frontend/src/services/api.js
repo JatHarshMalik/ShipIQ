@@ -1,41 +1,42 @@
-import axios from 'axios';
+/**
+ * ShipIQ API service — pure fetch, no axios dependency.
+ *
+ * All functions accept an optional sessionId (default: "default")
+ * so the UI can support multi-session workflows in the future.
+ */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
 
-const api = axios.create({
-  baseURL: API_BASE_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+async function request(path, options = {}) {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.status === 204 ? null : res.json();
+}
 
-export const cargoService = {
-  // Submit cargo and tank data
-  submitInput: async (cargos, tanks) => {
-    const response = await api.post('/input', {
-      cargos,
-      tanks,
-    });
-    return response.data;
-  },
+export const api = {
+  health: () => request('/health'),
 
-  // Run optimization
-  optimize: async () => {
-    const response = await api.post('/optimize');
-    return response.data;
-  },
+  submitInput: (cargos, tanks, sessionId = 'default') =>
+    request(sessionId === 'default' ? '/input' : `/input/${sessionId}`, {
+      method: 'POST',
+      body: JSON.stringify({ cargos, tanks }),
+    }),
 
-  // Get results
-  getResults: async () => {
-    const response = await api.get('/results');
-    return response.data;
-  },
+  optimize: (sessionId = 'default') =>
+    request(sessionId === 'default' ? '/optimize' : `/optimize/${sessionId}`, {
+      method: 'POST',
+    }),
 
-  // Health check
-  healthCheck: async () => {
-    const response = await api.get('/health');
-    return response.data;
-  },
+  getResults: (sessionId = 'default') =>
+    request(sessionId === 'default' ? '/results' : `/results/${sessionId}`),
+
+  clearSession: (sessionId) => request(`/session/${sessionId}`, { method: 'DELETE' }),
 };
 
 export default api;

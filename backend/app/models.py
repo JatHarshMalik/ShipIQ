@@ -7,32 +7,44 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class Cargo(BaseModel):
-    """Represents a cargo item with a unique ID and cubic volume."""
+    """Represents a cargo item with a unique ID, volume, and optional weight."""
 
     id: str = Field(..., description="Unique cargo identifier (e.g. C1)")
-    volume: float = Field(..., gt=0, description="Cubic volume of the cargo")
+    volume: float = Field(..., gt=0, description="Cubic volume of the cargo (m³)")
+    weight: float = Field(
+        default=0.0,
+        ge=0,
+        description="Mass of the cargo in metric tonnes (0 = unconstrained)",
+    )
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "id": "C1",
                 "volume": 1234,
+                "weight": 500,
             }
         }
     }
 
 
 class Tank(BaseModel):
-    """Represents a storage tank with a unique ID and capacity."""
+    """Represents a storage tank with a unique ID, capacity, and optional weight limit."""
 
     id: str = Field(..., description="Unique tank identifier (e.g. T1)")
-    capacity: float = Field(..., gt=0, description="Maximum capacity of the tank")
+    capacity: float = Field(..., gt=0, description="Maximum volume capacity (m³)")
+    weight_limit: float = Field(
+        default=0.0,
+        ge=0,
+        description="Maximum load in metric tonnes (0 = unconstrained)",
+    )
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "id": "T1",
                 "capacity": 1500,
+                "weight_limit": 600,
             }
         }
     }
